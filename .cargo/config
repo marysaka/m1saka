@@ -1,0 +1,9 @@
+[alias]
+bootloader-debug = "objcopy -- -O binary m1_playground-debug.bin"
+bootloader-release = "objcopy --release -- -O binary m1_playground-release.bin"
+
+[build]
+target = "aarch64-mary-none.json"
+
+[unstable]
+build-std = ["core", "compiler_builtins"]
