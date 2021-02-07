@@ -13,6 +13,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "cortex-a"
+version = "5.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d33a61602f83c3fff3e092967ad4d5d820a9fea7bc418e119616872085fe731d"
+dependencies = [
+ "register 1.0.2",
+]
+
+[[package]]
 name = "enum_primitive"
 version = "0.1.1"
 source = "git+https://github.com/roblabla/enum_primitive-rs.git?branch=master#e2344b98b16bcc54682bc838a87fcf1dfc6ab8d6"
@@ -33,10 +42,11 @@ dependencies = [
 name = "m1_playground"
 version = "0.1.0"
 dependencies = [
+ "cortex-a",
  "enum_primitive",
  "log",
  "num-traits",
- "register",
+ "register 0.3.3",
  "static_assertions",
 ]
 
@@ -55,7 +65,16 @@ version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "469bb5ddde81d67fb8bba4e14d77689b8166cfd077abe7530591cefe29d05823"
 dependencies = [
- "tock-registers",
+ "tock-registers 0.3.0",
+]
+
+[[package]]
+name = "register"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4a247de29ab7cc8f5006cfe775c4a81c704f9914c5e2a79696862e643135433"
+dependencies = [
+ "tock-registers 0.6.0",
 ]
 
 [[package]]
@@ -69,3 +88,9 @@ name = "tock-registers"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c758f5195a2e0df9d9fecf6f506506b2766ff74cf64db1e995c87e2761a5c3e2"
+
+[[package]]
+name = "tock-registers"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f521a79accce68c417c9c77ce22108056b626126da1932f7e2e9b5bbffee0cea"

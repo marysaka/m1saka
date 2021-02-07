@@ -4,8 +4,11 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::ptr;
 
-//use crate::exception_vectors;
-//use crate::mmu;
+use crate::m1::uart::UART;
+
+use crate::exception_vectors;
+use crate::mmu;
+use crate::utils;
 
 #[macro_export]
 macro_rules! entry {
@@ -22,8 +25,10 @@ macro_rules! entry {
 
 #[panic_handler]
 fn panic(panic_info: &PanicInfo<'_>) -> ! {
-    // TODO
-    loop {}
+    let mut uart = &mut UART::INSTANCE;
+    loop {
+        writeln!(&mut uart, "PANIC: {}\r", panic_info).ok();
+    }
 }
 
 extern "C" {
@@ -192,8 +197,18 @@ unsafe extern "C" fn clean_bss(start_bss: *mut u8, end_bss: *mut u8) {
 
 #[no_mangle]
 pub unsafe extern "C" fn _start_with_stack() -> ! {
-    //exception_vectors::setup();
-    //mmu::setup();
+    // Ensure UART is at standard baud.
+    let mut uart = &mut UART::INSTANCE;
+    //uart.init(115_200);
+
+    // Wait for user to input something before continuing (to be sure someone is watching logs)
+    //utils::wait_for_input();
+
+    writeln!(&mut uart, "Hello from EL {}", utils::get_current_el()).ok();
+
+    exception_vectors::setup();
+    writeln!(&mut uart, "exception vectors setup done").ok();
+    mmu::setup();
 
     // Call user entry point
     extern "Rust" {

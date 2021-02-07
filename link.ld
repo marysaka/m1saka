@@ -163,7 +163,7 @@ SECTIONS
 
     . = ALIGN(16);
     _stack_bottom = .;
-    . = . + 0x1000; /* 4kB of stack memory */
+    . = . + 0x10000; /* 64kB of stack memory */
     . = ALIGN(16);
     PROVIDE(_stack_top = .);
   } :bss
