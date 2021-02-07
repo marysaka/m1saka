@@ -20,7 +20,7 @@ pub fn get_current_el() -> u32 {
     current_el >> 2
 }
 
-pub fn get_mair_el2() -> u64{
+pub fn get_mair_el2() -> u64 {
     let val: u64;
 
     unsafe {

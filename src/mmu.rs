@@ -280,8 +280,6 @@ unsafe fn get_lvl2_table(vaddr: u64) -> Option<&'static mut TableLVL2> {
     lvl1_entry &= (1 << L0_INDEX_LSB) - 1;
     lvl1_entry &= !((1 << PAGE_GRANULE) - 1);
 
-
-
     (lvl1_entry as *mut TableLVL2).as_mut()
 }
 
@@ -299,7 +297,8 @@ fn create_lvl2_block_entry(vaddr: u64, paddr: u64, memory_attribute: u64) {
     unsafe {
         let table = get_lvl2_table(vaddr).expect("Out of LVL2 tables");
 
-        table.entries[lvl2_index] = (flags + STAGE2_BLOCK_DESCRIPTOR::ADDRESS_16K.val(paddr >> L2_INDEX_LSB)).value;
+        table.entries[lvl2_index] =
+            (flags + STAGE2_BLOCK_DESCRIPTOR::ADDRESS_16K.val(paddr >> L2_INDEX_LSB)).value;
 
         dsb(SY);
     };
@@ -311,7 +310,10 @@ fn create_lvl1_table_entry(vaddr: u64, table_address: u64) {
     let lvl1_index = (vaddr / lvl1_align_size) as usize % ENTRIES_PER_LEVEL;
 
     unsafe {
-        LVL0_TABLE.lvl1[0].entries[lvl1_index] = (STAGE1_NEXTLEVEL_DESCRIPTOR::VALID::True + STAGE1_NEXTLEVEL_DESCRIPTOR::TYPE::Table + STAGE1_NEXTLEVEL_DESCRIPTOR::ADDRESS_16K.val(table_address >> PAGE_GRANULE)).value;
+        LVL0_TABLE.lvl1[0].entries[lvl1_index] = (STAGE1_NEXTLEVEL_DESCRIPTOR::VALID::True
+            + STAGE1_NEXTLEVEL_DESCRIPTOR::TYPE::Table
+            + STAGE1_NEXTLEVEL_DESCRIPTOR::ADDRESS_16K.val(table_address >> PAGE_GRANULE))
+        .value;
 
         dsb(SY);
     };
@@ -337,10 +339,12 @@ fn init_page_mapping() {
     // Setup LVL0 entries
     unsafe {
         for (lvl0_index, lvl0_entry) in LVL0_TABLE.entries.iter_mut().enumerate() {
-            let table_address =
-                &LVL0_TABLE.lvl1[lvl0_index].entries[0] as *const _ as u64;
+            let table_address = &LVL0_TABLE.lvl1[lvl0_index].entries[0] as *const _ as u64;
 
-            *lvl0_entry = (STAGE1_NEXTLEVEL_DESCRIPTOR::VALID::True + STAGE1_NEXTLEVEL_DESCRIPTOR::TYPE::Table + STAGE1_NEXTLEVEL_DESCRIPTOR::ADDRESS_16K.val(table_address >> PAGE_GRANULE)).value;
+            *lvl0_entry = (STAGE1_NEXTLEVEL_DESCRIPTOR::VALID::True
+                + STAGE1_NEXTLEVEL_DESCRIPTOR::TYPE::Table
+                + STAGE1_NEXTLEVEL_DESCRIPTOR::ADDRESS_16K.val(table_address >> PAGE_GRANULE))
+            .value;
         }
     }
 
