@@ -188,11 +188,11 @@ pub unsafe extern "C" fn relocate_self(aslr_base: *mut u8) -> u32 {
 
 #[no_mangle]
 unsafe extern "C" fn clean_bss(start_bss: *mut u8, end_bss: *mut u8) {
-    ptr::write_bytes(
+    /*ptr::write_bytes(
         start_bss,
         0,
         end_bss as *const _ as usize - start_bss as *const _ as usize,
-    );
+    );*/
 }
 
 #[no_mangle]

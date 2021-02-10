@@ -41,7 +41,7 @@ const L0_INDEX_LSB: usize = L1_INDEX_LSB + ENTRIES_PER_LEVEL_BITS;
 // 48 bits address space
 const TARGET_BITS: usize = 48;
 
-const NUM_LVL1_ENTRIES: usize = 0x4;
+const NUM_LVL1_ENTRIES: usize = 0x3;
 
 const TCR_IPS_1TB: u64 = ((0b010) << 32);
 const TCR_TG1_16K: u64 = ((0b01) << 30);
@@ -66,8 +66,16 @@ struct TableLVL0 {
 #[repr(C)]
 #[repr(align(0x4000))]
 #[derive(Copy, Clone)]
+struct TableLVL3 {
+    entries: [u64; ENTRIES_PER_LEVEL],
+}
+
+#[repr(C)]
+#[repr(align(0x4000))]
+#[derive(Copy, Clone)]
 struct TableLVL2 {
     entries: [u64; ENTRIES_PER_LEVEL],
+    lvl3: [TableLVL3; ENTRIES_PER_LEVEL],
 }
 
 #[repr(C)]
@@ -84,6 +92,9 @@ static mut LVL0_TABLE: TableLVL0 = TableLVL0 {
         entries: [0x0; ENTRIES_PER_LEVEL],
         lvl2: [TableLVL2 {
             entries: [0x0; ENTRIES_PER_LEVEL],
+            lvl3: [TableLVL3 {
+                entries: [0x0; ENTRIES_PER_LEVEL],
+            }; ENTRIES_PER_LEVEL],
         }; NUM_LVL1_ENTRIES],
     }; 2],
 };
@@ -227,7 +238,9 @@ register_bitfields! {u64,
             True = 1
         ],
 
-        ADDRESS OFFSET(12) NUMBITS(36) [],
+        ADDRESS_4K OFFSET(12) NUMBITS(36) [],
+        ADDRESS_16K OFFSET(14) NUMBITS(34) [],
+        ADDRESS_64K OFFSET(16) NUMBITS(32) [],
 
         XN OFFSET(54) NUMBITS(1) [
             False = 0,
@@ -283,6 +296,75 @@ unsafe fn get_lvl2_table(vaddr: u64) -> Option<&'static mut TableLVL2> {
     (lvl1_entry as *mut TableLVL2).as_mut()
 }
 
+fn create_lvl3_page(vaddr: u64, paddr: u64, permission: MemoryPermission, memory_attribute: u64) {
+    let lvl2_align_size = 1 << L2_INDEX_LSB;
+    let lvl3_align_size = 1 << L3_INDEX_LSB;
+
+    let lvl2_index = (vaddr / lvl2_align_size) as usize % ENTRIES_PER_LEVEL;
+    let lvl3_index = (vaddr / lvl3_align_size) as usize % ENTRIES_PER_LEVEL;
+
+    let table;
+
+    unsafe {
+        table = get_lvl2_table(vaddr).expect("Out of LVL2 tables");
+
+        create_lvl2_table_entry(
+            vaddr,
+            &table.lvl3[lvl2_index].entries[0] as *const _ as u64,
+        );
+    }
+
+    let mut flags = STAGE3_TABLE_DESCRIPTOR::VALID::True
+        + STAGE3_TABLE_DESCRIPTOR::TYPE::Table
+        + STAGE3_TABLE_DESCRIPTOR::MEMORY_ATTR.val(memory_attribute)
+        + STAGE3_TABLE_DESCRIPTOR::SH::InnerShareable
+        + STAGE3_TABLE_DESCRIPTOR::AF::True;
+
+    flags = match permission {
+        MemoryPermission::R => {
+            flags + STAGE3_TABLE_DESCRIPTOR::AP::RO_CURRENT_EL + STAGE3_TABLE_DESCRIPTOR::XN::True
+        }
+        MemoryPermission::RW | MemoryPermission::W => {
+            flags + STAGE3_TABLE_DESCRIPTOR::AP::RW_CURRENT_EL + STAGE3_TABLE_DESCRIPTOR::XN::True
+        }
+        MemoryPermission::RWX => {
+            flags + STAGE3_TABLE_DESCRIPTOR::AP::RW_CURRENT_EL + STAGE3_TABLE_DESCRIPTOR::XN::False
+        }
+        MemoryPermission::RX | MemoryPermission::X => {
+            flags + STAGE3_TABLE_DESCRIPTOR::AP::RO_CURRENT_EL + STAGE3_TABLE_DESCRIPTOR::XN::False
+        }
+        _ => flags,
+    };
+
+    unsafe {
+        let value = if permission == MemoryPermission::Invalid {
+            0
+        } else {
+            (flags + STAGE3_TABLE_DESCRIPTOR::ADDRESS_16K.val(paddr >> PAGE_GRANULE)).value
+        };
+
+
+        table.lvl3[lvl2_index].entries[lvl3_index] = value;
+        dsb(SY);
+    };
+}
+
+fn create_lvl2_table_entry(vaddr: u64, table_address: u64) {
+    let lvl2_align_size = 1 << L2_INDEX_LSB;
+
+    let lvl2_index = (vaddr / lvl2_align_size) as usize % ENTRIES_PER_LEVEL;
+
+    let flags = STAGE2_NEXTLEVEL_DESCRIPTOR::VALID::True + STAGE2_NEXTLEVEL_DESCRIPTOR::TYPE::Table;
+    unsafe {
+        let table = get_lvl2_table(vaddr).expect("Out of LVL2 tables");
+
+        table.entries[lvl2_index] = (flags
+            + STAGE2_NEXTLEVEL_DESCRIPTOR::ADDRESS_16K.val(table_address >> L3_INDEX_LSB))
+        .value;
+        dsb(SY);
+    };
+}
+
 fn create_lvl2_block_entry(vaddr: u64, paddr: u64, memory_attribute: u64) {
     let lvl2_align_size = 1 << L2_INDEX_LSB;
 
@@ -335,6 +417,125 @@ fn map_lvl2_block(vaddr: u64, paddr: u64, size: u64, memory_attribute: u64) {
     }
 }
 
+pub fn map_normal_page(vaddr: u64, paddr: u64, size: u64, permission: MemoryPermission) {
+    map_page(vaddr, paddr, size, permission, mem_attr::NORMAL)
+}
+
+pub fn map_page(
+    vaddr: u64,
+    paddr: u64,
+    size: u64,
+    permission: MemoryPermission,
+    memory_attribute: u64,
+) {
+    if size == 0 {
+        return;
+    }
+
+    let lvl3_align_size = 1 << L3_INDEX_LSB;
+    let size = utils::align_up(size, lvl3_align_size);
+
+    let mut vaddr = utils::align_down(vaddr, lvl3_align_size);
+    let mut paddr = utils::align_down(paddr, lvl3_align_size);
+    let mut page_count = size / lvl3_align_size;
+
+    while page_count != 0 {
+        create_lvl3_page(vaddr, paddr, permission, memory_attribute);
+        vaddr += lvl3_align_size;
+        paddr += lvl3_align_size;
+        page_count -= 1;
+    }
+
+    // TLB maintenance
+    // TODO: EL2 & EL3
+    unsafe {
+        dsb(SY);
+        isb(SY);
+    };
+
+    //invalidate_tlb_all()
+}
+
+pub fn unmap_page(vaddr: u64, size: u64) {
+    if size == 0 {
+        return;
+    }
+
+    let lvl3_align_size = 1 << L3_INDEX_LSB;
+    let size = utils::align_up(size, lvl3_align_size);
+
+    let mut vaddr = utils::align_down(vaddr, lvl3_align_size);
+    let mut page_count = size / lvl3_align_size;
+
+    while page_count != 0 {
+        create_lvl3_page(vaddr, 0, MemoryPermission::Invalid, mem_attr::NORMAL);
+        vaddr += lvl3_align_size;
+        page_count -= 1;
+    }
+
+    // TLB maintenance
+    // TODO: EL2 & EL3
+    unsafe {
+        dsb(SY);
+        isb(SY);
+    };
+
+    invalidate_tlb_all()
+}
+
+unsafe fn init_executable_mapping() {
+    let text_start = &__text_start__ as *const _ as u64;
+    let text_end = &__text_end__ as *const _ as u64;
+    map_normal_page(
+        text_start,
+        text_start,
+        text_end - text_start,
+        MemoryPermission::RX,
+    );
+
+    let ro_start = &__rodata_start__ as *const _ as u64;
+    let ro_end = &__rodata_end__ as *const _ as u64;
+    map_normal_page(ro_start, ro_start, ro_end - ro_start, MemoryPermission::R);
+
+    let data_start = &__data_start__ as *const _ as u64;
+    let data_end = &__data_end__ as *const _ as u64;
+    map_normal_page(
+        data_start,
+        data_start,
+        data_end - data_start,
+        MemoryPermission::RW,
+    );
+
+    let bss_start = &__bss_start__ as *const _ as u64;
+    let bss_end = &__bss_end__ as *const _ as u64;
+    map_normal_page(
+        bss_start,
+        bss_start,
+        bss_end - bss_start,
+        MemoryPermission::RW,
+    );
+
+    // Setup our stack
+    let stack_start = &_stack_bottom as *const _ as u64;
+    let stack_end = &_stack_top as *const _ as u64;
+    map_normal_page(
+        stack_start,
+        stack_start,
+        stack_end - stack_start,
+        MemoryPermission::RW,
+    );
+
+    // Also setup the exception vector
+    let vectors_start = &__vectors_start__ as *const _ as u64;
+    let vectors_end = &__vectors_end__ as *const _ as u64;
+    map_normal_page(
+        vectors_start,
+        vectors_start,
+        vectors_end - vectors_start,
+        MemoryPermission::RX,
+    );
+}
+
 fn init_page_mapping() {
     // Setup LVL0 entries
     unsafe {
@@ -370,8 +571,13 @@ fn init_page_mapping() {
 
     // Map 16GB of normal memory
     map_lvl2_block(0x0800000000, 0x0800000000, 0x0400000000, mem_attr::NORMAL);
+
+    unsafe {
+        //init_executable_mapping();
+    }
 }
 
+#[inline]
 fn get_sctlr() -> u64 {
     let mut ctrl: u64;
 
@@ -386,6 +592,7 @@ fn get_sctlr() -> u64 {
     ctrl
 }
 
+#[inline]
 fn set_sctlr(new_sctlr: u64) {
     unsafe {
         match utils::get_current_el() {
@@ -398,8 +605,11 @@ fn set_sctlr(new_sctlr: u64) {
     }
 }
 
+#[inline]
 pub fn invalidate_tlb_all() {
     unsafe {
+        dsb(SY);
+
         match utils::get_current_el() {
             1 => asm!("tlbi vmalle1"),
             2 => asm!("tlbi alle2"),
@@ -411,6 +621,7 @@ pub fn invalidate_tlb_all() {
     }
 }
 
+#[inline]
 pub fn invalidate_icache_all() {
     unsafe {
         asm!("ic iallu");
@@ -419,15 +630,20 @@ pub fn invalidate_icache_all() {
     }
 }
 
+#[inline]
 unsafe fn set_mair_ttbr_tcr(mair: u64, ttbr: u64, tcr: u64) {
     match utils::get_current_el() {
         1 => {
             asm!(
                 "
+                dsb sy
                 msr mair_el1, {mair}
                 msr tcr_el1, {tcr}
                 msr ttbr0_el1, {ttbr}
                 msr ttbr1_el1, {ttbr}
+                tlbi vmalle1
+                dsb sy
+                isb sy
                 ",
                 mair = in(reg) mair,
                 ttbr = in(reg) ttbr,
@@ -438,10 +654,14 @@ unsafe fn set_mair_ttbr_tcr(mair: u64, ttbr: u64, tcr: u64) {
         2 => {
             asm!(
                 "
+                dsb sy
                 msr mair_el2, {mair}
                 msr tcr_el2, {tcr}
                 msr ttbr0_el2, {ttbr}
                 msr ttbr1_el2, {ttbr}
+                tlbi alle2
+                dsb sy
+                isb sy
                 ",
                 mair = in(reg) mair,
                 ttbr = in(reg) ttbr,
@@ -451,11 +671,6 @@ unsafe fn set_mair_ttbr_tcr(mair: u64, ttbr: u64, tcr: u64) {
         }
         _ => unimplemented!(),
     }
-
-    dsb(ISHST);
-    asm!("tlbi vmalls12e1is");
-    dsb(ISH);
-    isb(SY);
 }
 
 pub unsafe fn setup() {
@@ -486,24 +701,15 @@ pub unsafe fn setup() {
         | ((64 - TARGET_BITS as u64) << 0);
     set_mair_ttbr_tcr(mair, ttbr, tcr);
 
-    // Invalidate icache as we are going to activate it.
-    invalidate_icache_all();
-
     // finally enable MMU and cache
     let mut ctrl = get_sctlr();
 
-    ctrl |= 0xC00800; // mandatory reserved bits
     ctrl |= (1 << 12) |    // I, Instruction cache enable. This is an enable bit for instruction caches at EL0 and EL1
-            (1 << 4)  |    // SA0, Stack Alignment Check Enable for EL0
-            (1 << 3)  |    // SA, Stack Alignment Check Enable
             (1 << 2)  |    // C, Data cache enable. This is an enable bit for data caches at EL0 and EL1
-            (1 << 1)  |    // A, Alignment check enable bit
-            (1 << 0); // set M, enable MMU
+            (1 << 0);      // set M, enable MMU
 
     set_sctlr(ctrl);
 
-    // and hope that it's okayish
+    invalidate_icache_all();
     invalidate_tlb_all();
-
-    writeln!(&mut uart, "MMU configured").ok();
 }
