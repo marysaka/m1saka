@@ -8,686 +8,198 @@ use core::fmt::Write;
 
 use crate::m1::uart::UART;
 
-extern "C" {
-    static mut __text_start__: u8;
-    static mut __text_end__: u8;
-    static mut __vectors_start__: u8;
-    static mut __vectors_end__: u8;
-    static mut __rodata_start__: u8;
-    static mut __rodata_end__: u8;
-    static mut __data_start__: u8;
-    static mut __data_end__: u8;
-    static mut __bss_start__: u8;
-    static mut __bss_end__: u8;
-    static _stack_bottom: u8;
-    static _stack_top: u8;
-}
+use alloc::alloc::Layout;
 
-const PAGE_GRANULE_4K: usize = 12;
-const PAGE_GRANULE_16K: usize = 14;
-const PAGE_GRANULE_64K: usize = 16;
-
-const PAGE_GRANULE: usize = PAGE_GRANULE_16K;
+const PAGE_GRANULE: usize = 14;
 
 const ENTRY_SHIFT: usize = 3;
 const ENTRIES_PER_LEVEL_BITS: usize = PAGE_GRANULE - ENTRY_SHIFT;
 const ENTRIES_PER_LEVEL: usize = 1 << ENTRIES_PER_LEVEL_BITS;
 
-const L3_INDEX_LSB: usize = PAGE_GRANULE;
-const L2_INDEX_LSB: usize = L3_INDEX_LSB + ENTRIES_PER_LEVEL_BITS;
-const L1_INDEX_LSB: usize = L2_INDEX_LSB + ENTRIES_PER_LEVEL_BITS;
-const L0_INDEX_LSB: usize = L1_INDEX_LSB + ENTRIES_PER_LEVEL_BITS;
+const L3_PAGE_SIZE: u64 = 1 << PAGE_GRANULE as u64;
+const L2_PAGE_SIZE: u64 = 1 << (PAGE_GRANULE + ENTRIES_PER_LEVEL_BITS) as u64;
+const L1_PAGE_SIZE: u64 = 1 << (PAGE_GRANULE + ENTRIES_PER_LEVEL_BITS + ENTRIES_PER_LEVEL_BITS) as u64;
+const L0_PAGE_SIZE: u64 = 1 << (PAGE_GRANULE + ENTRIES_PER_LEVEL_BITS + ENTRIES_PER_LEVEL_BITS + ENTRIES_PER_LEVEL_BITS) as u64;
 
-// 48 bits address space
-const TARGET_BITS: usize = 48;
+const PTE_TYPE_BLOCK: u64 = 0b01;
+const PTE_TYPE_TABLE: u64 = 0b11;
+const PTE_FLAG_ACCESS: u64 = 1 << 10;
 
-const NUM_LVL1_ENTRIES: usize = 0x3;
+const PTE_AP_EL0: u64 = 1 << 6;
+const PTE_AP_RO: u64 = 1 << 7;
+const PTE_PXN: u64 = 1 << 53;
+const PTE_UXN: u64 = 1 << 54;
 
-const TCR_IPS_1TB: u64 = ((0b010) << 32);
-const TCR_TG1_16K: u64 = ((0b01) << 30);
-const TCR_SH1_IS: u64 = ((0b11) << 28);
-const TCR_ORGN1_WBWA: u64 = ((0b01) << 26);
-const TCR_IRGN1_WBWA: u64 = ((0b01) << 24);
-const TCR_T1SZ_48BIT: u64 = ((0b101) << 16);
-const TCR_TG0_16K: u64 = ((0b10) << 14);
-const TCR_SH0_IS: u64 = ((0b11) << 12);
-const TCR_ORGN0_WBWA: u64 = ((0b01) << 10);
-const TCR_IRGN0_WBWA: u64 = ((0b01) << 8);
-const TCR_T0SZ_48BIT: u64 = ((16) << 0);
+const PERMISSION_RO: u64 = PTE_AP_RO | PTE_PXN | PTE_UXN;
+const PERMISSION_RW: u64 = PTE_PXN | PTE_UXN;
+const PERMISSION_RWX: u64 = 0;
 
-#[repr(C)]
-#[repr(align(0x4000))]
-#[derive(Copy, Clone)]
-struct TableLVL0 {
-    entries: [u64; 2],
-    lvl1: [TableLVL1; 2],
-}
-
-#[repr(C)]
-#[repr(align(0x4000))]
-#[derive(Copy, Clone)]
-struct TableLVL3 {
-    entries: [u64; ENTRIES_PER_LEVEL],
-}
-
-#[repr(C)]
-#[repr(align(0x4000))]
-#[derive(Copy, Clone)]
-struct TableLVL2 {
-    entries: [u64; ENTRIES_PER_LEVEL],
-    lvl3: [TableLVL3; ENTRIES_PER_LEVEL],
-}
-
-#[repr(C)]
-#[repr(align(0x4000))]
-#[derive(Copy, Clone)]
-struct TableLVL1 {
-    entries: [u64; ENTRIES_PER_LEVEL],
-    lvl2: [TableLVL2; NUM_LVL1_ENTRIES],
-}
-
-static mut LVL0_TABLE: TableLVL0 = TableLVL0 {
-    entries: [0x0; 2],
-    lvl1: [TableLVL1 {
-        entries: [0x0; ENTRIES_PER_LEVEL],
-        lvl2: [TableLVL2 {
-            entries: [0x0; ENTRIES_PER_LEVEL],
-            lvl3: [TableLVL3 {
-                entries: [0x0; ENTRIES_PER_LEVEL],
-            }; ENTRIES_PER_LEVEL],
-        }; NUM_LVL1_ENTRIES],
-    }; 2],
-};
-
-static mut next_lvl1_index: usize = 0;
-
-#[derive(Copy, Clone, PartialEq)]
-pub enum MemoryPermission {
-    Invalid,
-    R,
-    W,
-    X,
-    RW,
-    RX,
-    RWX,
-}
-
-register_bitfields! {u64,
-    STAGE1_NEXTLEVEL_DESCRIPTOR [
-        VALID OFFSET(0) NUMBITS(1) [
-            True = 1
-        ],
-
-        TYPE OFFSET(1) NUMBITS(1) [
-            Table = 1
-        ],
-
-        ADDRESS_4K OFFSET(12) NUMBITS(36) [],
-        ADDRESS_16K OFFSET(14) NUMBITS(34) [],
-        ADDRESS_64K OFFSET(16) NUMBITS(32) [],
-
-        PXN OFFSET(59) NUMBITS(1) [
-            False = 0,
-            True = 1
-        ],
-
-        XN OFFSET(60) NUMBITS(1) [
-            False = 0,
-            True = 1
-        ],
-
-        AP_TABLE OFFSET(61) NUMBITS(2) [
-            NO_EFFECT = 0b00,
-            NO_EL0 = 0b01,
-            NO_WRITE = 0b10,
-            NO_WRITE_EL0_READ = 0b11
-        ],
-
-        NS OFFSET(63) NUMBITS(1) [
-            False = 0,
-            True = 1
-        ]
-    ]
-}
-
-register_bitfields! {u64,
-    STAGE2_BLOCK_DESCRIPTOR [
-        VALID OFFSET(0) NUMBITS(1) [
-            True = 1
-        ],
-
-        TYPE OFFSET(1) NUMBITS(1) [
-            Block = 0
-        ],
-
-        MEMORY_ATTR OFFSET(2) NUMBITS(4) [],
-
-        AP OFFSET(6) NUMBITS(2) [
-            RW_CURRENT_EL = 0b00,
-            RW_BOTH_EL = 0b01,
-            RO_CURRENT_EL = 0b10,
-            RO_BOTH_EL = 0b11
-        ],
-
-        SH OFFSET(8) NUMBITS(2) [
-            OuterShareable = 0b10,
-            InnerShareable = 0b11
-        ],
-
-        AF OFFSET(10) NUMBITS(1) [
-            False = 0,
-            True = 1
-        ],
-
-        ADDRESS_4K OFFSET(21) NUMBITS(27) [],
-        ADDRESS_16K OFFSET(25) NUMBITS(23) [],
-        ADDRESS_64K OFFSET(29) NUMBITS(19) [],
-
-        CONTIGUOUS OFFSET(52) NUMBITS(1) [],
-
-        XN OFFSET(54) NUMBITS(1) [
-            False = 0,
-            True = 1
-        ]
-    ]
-
-}
-
-register_bitfields! {u64,
-    STAGE2_NEXTLEVEL_DESCRIPTOR [
-        VALID OFFSET(0) NUMBITS(1) [
-            True = 1
-        ],
-
-        TYPE OFFSET(1) NUMBITS(1) [
-            Table = 1
-        ],
-
-        ADDRESS_4K OFFSET(12) NUMBITS(36) [],
-        ADDRESS_16K OFFSET(14) NUMBITS(34) [],
-        ADDRESS_64K OFFSET(16) NUMBITS(32) []
-    ]
-}
-
-register_bitfields! {u64,
-    STAGE3_TABLE_DESCRIPTOR [
-        VALID OFFSET(0) NUMBITS(1) [
-            True = 1
-        ],
-
-        TYPE OFFSET(1) NUMBITS(1) [
-            Table = 1
-        ],
-
-        MEMORY_ATTR OFFSET(2) NUMBITS(4) [],
-
-        AP OFFSET(6) NUMBITS(2) [
-            RW_CURRENT_EL = 0b00,
-            RW_BOTH_EL = 0b01,
-            RO_CURRENT_EL = 0b10,
-            RO_BOTH_EL = 0b11
-        ],
-
-        SH OFFSET(8) NUMBITS(2) [
-            OuterShareable = 0b10,
-            InnerShareable = 0b11
-        ],
-
-        AF OFFSET(10) NUMBITS(1) [
-            False = 0,
-            True = 1
-        ],
-
-        ADDRESS_4K OFFSET(12) NUMBITS(36) [],
-        ADDRESS_16K OFFSET(14) NUMBITS(34) [],
-        ADDRESS_64K OFFSET(16) NUMBITS(32) [],
-
-        XN OFFSET(54) NUMBITS(1) [
-            False = 0,
-            True = 1
-        ]
-    ]
-}
+const TCR_IPS_1TB: u64 = 0b010 << 32;
+const TCR_TG1_16K: u64 = 0b01 << 30;
+const TCR_SH1_IS: u64 = 0b11 << 28;
+const TCR_ORGN1_WBWA: u64 = 0b01 << 26;
+const TCR_IRGN1_WBWA: u64 = 0b01 << 24;
+const TCR_T1SZ_48BIT: u64 = 0b101 << 16;
+const TCR_TG0_16K: u64 = 0b10 << 14;
+const TCR_SH0_IS: u64 = 0b11 << 12;
+const TCR_ORGN0_WBWA: u64 = 0b01 << 10;
+const TCR_IRGN0_WBWA: u64 = 0b01 << 8;
+const TCR_T0SZ_48BIT: u64 = 16 << 0;
 
 pub mod mem_attr {
     // Normal memory
-    pub const NORMAL: u64 = 0;
+    pub const NORMAL: u8 = 0;
 
     // Device-nGnRnE
-    pub const MMIO_nGnRnE: u64 = 1;
+    pub const DEVICE_nGnRnE: u8 = 1;
 
     // Device-nGnRE
-    pub const MMIO_nGnRE: u64 = 2;
+    pub const DEVICE_nGnRE: u8 = 2;
 }
 
-unsafe fn get_lvl2_table(vaddr: u64) -> Option<&'static mut TableLVL2> {
-    let lvl1_align_size = 1 << L1_INDEX_LSB;
+#[repr(C)]
+#[repr(align(0x4000))]
+struct TableLVL0 {
+    entries: [u64; 2],
+}
 
-    let lvl1_index = (vaddr / lvl1_align_size) as usize % ENTRIES_PER_LEVEL;
+#[repr(C)]
+#[repr(align(0x4000))]
+struct LevelTable {
+    entries: [u64; ENTRIES_PER_LEVEL],
+}
 
-    if next_lvl1_index == NUM_LVL1_ENTRIES {
-        return None;
-    }
+static mut LVL0_TABLE: TableLVL0 = TableLVL0 {
+    entries: [0x0 ; 2]
+};
 
-    let mut lvl1_entry = LVL0_TABLE.lvl1[0].entries[lvl1_index];
+static mut LVL1_TABLE: [LevelTable; 2] = [LevelTable {
+    entries: [0x0 ; ENTRIES_PER_LEVEL]
+}, LevelTable {
+    entries: [0x0 ; ENTRIES_PER_LEVEL]
+}];
+
+static mut page_table_lvl2_index: usize = 0;
+
+unsafe fn create_block_page_table_entry(addr: u64, attr: u8, permissions: u64) -> u64 {
+    PTE_TYPE_BLOCK | addr | PTE_FLAG_ACCESS | (u64::from(attr) & 7) << 2 | permissions
+}
+
+unsafe fn create_table_page_table_entry(addr: u64) -> u64 {
+    PTE_TYPE_TABLE | addr | PTE_FLAG_ACCESS
+}
+
+unsafe fn get_lvl2_table(virtual_address: u64) -> Option<&'static mut LevelTable> {
+    let lvl0_index = (virtual_address / L0_PAGE_SIZE) as usize % 2;
+    let lvl1_index = (virtual_address / L1_PAGE_SIZE) as usize % ENTRIES_PER_LEVEL;
+
+    let mut lvl1_entry = LVL1_TABLE[lvl0_index].entries[lvl1_index];
 
     if lvl1_entry == 0 {
         writeln!(
             &mut UART::INSTANCE,
             "Creating new lvl2 table 0x{:x} (0x{:x})",
             lvl1_index,
-            vaddr
+            virtual_address
         )
         .ok();
 
-        create_lvl1_table_entry(
-            vaddr,
-            &LVL0_TABLE.lvl1[0].lvl2[next_lvl1_index].entries[0] as *const _ as u64,
-        );
+        let lvl2_table_layout = Layout::new::<LevelTable>();
+        let lvl2_table = alloc::alloc::alloc(lvl2_table_layout);
 
-        next_lvl1_index += 1;
+        writeln!(
+            &mut UART::INSTANCE,
+            "{:p}",
+            lvl2_table,
+        )
+        .ok();
 
-        lvl1_entry = LVL0_TABLE.lvl1[0].entries[lvl1_index];
+        LVL1_TABLE[lvl0_index].entries[lvl1_index] = create_table_page_table_entry(lvl2_table as u64);
+
+        lvl1_entry = LVL1_TABLE[lvl0_index].entries[lvl1_index];
     }
 
-    lvl1_entry &= (1 << L0_INDEX_LSB) - 1;
+    lvl1_entry &= (1 << 48) - 1;
     lvl1_entry &= !((1 << PAGE_GRANULE) - 1);
 
-    (lvl1_entry as *mut TableLVL2).as_mut()
+    (lvl1_entry as *mut LevelTable).as_mut()
 }
 
-fn create_lvl3_page(vaddr: u64, paddr: u64, permission: MemoryPermission, memory_attribute: u64) {
-    let lvl2_align_size = 1 << L2_INDEX_LSB;
-    let lvl3_align_size = 1 << L3_INDEX_LSB;
+unsafe fn add_single_lvl2_mapping(virtual_address: u64, physical_address: u64,  attribute: u8, permissions: u64) {
+    let table_lvl2 = get_lvl2_table(virtual_address).expect("Cannot allocate lvl2 table!");
 
-    let lvl2_index = (vaddr / lvl2_align_size) as usize % ENTRIES_PER_LEVEL;
-    let lvl3_index = (vaddr / lvl3_align_size) as usize % ENTRIES_PER_LEVEL;
+    let lvl2_index = (virtual_address / L2_PAGE_SIZE) as usize % ENTRIES_PER_LEVEL;
 
-    let table;
+    assert!(table_lvl2.entries[lvl2_index] == 0, "lvl2 entry already allocated!");
 
-    unsafe {
-        table = get_lvl2_table(vaddr).expect("Out of LVL2 tables");
+    table_lvl2.entries[lvl2_index] = create_block_page_table_entry(physical_address, attribute, permissions);
 
-        create_lvl2_table_entry(
-            vaddr,
-            &table.lvl3[lvl2_index].entries[0] as *const _ as u64,
-        );
-    }
+    //writeln!(&mut UART::INSTANCE, "0x{:x}: table_lvl2.entries[{}] = {:x}", virtual_address, lvl2_index, table_lvl2.entries[lvl2_index]);
+}
 
-    let mut flags = STAGE3_TABLE_DESCRIPTOR::VALID::True
-        + STAGE3_TABLE_DESCRIPTOR::TYPE::Table
-        + STAGE3_TABLE_DESCRIPTOR::MEMORY_ATTR.val(memory_attribute)
-        + STAGE3_TABLE_DESCRIPTOR::SH::InnerShareable
-        + STAGE3_TABLE_DESCRIPTOR::AF::True;
+fn add_lvl2_mapping(virtual_address: u64, physical_address: u64, size: usize, attribute: u8, permissions: u64) {
+    assert!((virtual_address % L2_PAGE_SIZE) == 0, "virtual_address not aligned");
+    assert!((physical_address % L2_PAGE_SIZE) == 0, "physical_address not aligned");
+    assert!((size % (L2_PAGE_SIZE as usize)) == 0, "size not aligned");
 
-    flags = match permission {
-        MemoryPermission::R => {
-            flags + STAGE3_TABLE_DESCRIPTOR::AP::RO_CURRENT_EL + STAGE3_TABLE_DESCRIPTOR::XN::True
+    let mut current_virtual_address: u64 = virtual_address;
+    let mut current_physical_address: u64 = physical_address;
+    let mut remaining_size: usize = size;
+
+    while (remaining_size > 0) {
+        unsafe {
+            add_single_lvl2_mapping(current_virtual_address, current_physical_address, attribute, permissions);
         }
-        MemoryPermission::RW | MemoryPermission::W => {
-            flags + STAGE3_TABLE_DESCRIPTOR::AP::RW_CURRENT_EL + STAGE3_TABLE_DESCRIPTOR::XN::True
-        }
-        MemoryPermission::RWX => {
-            flags + STAGE3_TABLE_DESCRIPTOR::AP::RW_CURRENT_EL + STAGE3_TABLE_DESCRIPTOR::XN::False
-        }
-        MemoryPermission::RX | MemoryPermission::X => {
-            flags + STAGE3_TABLE_DESCRIPTOR::AP::RO_CURRENT_EL + STAGE3_TABLE_DESCRIPTOR::XN::False
-        }
-        _ => flags,
-    };
 
-    unsafe {
-        let value = if permission == MemoryPermission::Invalid {
-            0
-        } else {
-            (flags + STAGE3_TABLE_DESCRIPTOR::ADDRESS_16K.val(paddr >> PAGE_GRANULE)).value
-        };
-
-
-        table.lvl3[lvl2_index].entries[lvl3_index] = value;
-        dsb(SY);
-    };
-}
-
-fn create_lvl2_table_entry(vaddr: u64, table_address: u64) {
-    let lvl2_align_size = 1 << L2_INDEX_LSB;
-
-    let lvl2_index = (vaddr / lvl2_align_size) as usize % ENTRIES_PER_LEVEL;
-
-    let flags = STAGE2_NEXTLEVEL_DESCRIPTOR::VALID::True + STAGE2_NEXTLEVEL_DESCRIPTOR::TYPE::Table;
-    unsafe {
-        let table = get_lvl2_table(vaddr).expect("Out of LVL2 tables");
-
-        table.entries[lvl2_index] = (flags
-            + STAGE2_NEXTLEVEL_DESCRIPTOR::ADDRESS_16K.val(table_address >> L3_INDEX_LSB))
-        .value;
-        dsb(SY);
-    };
-}
-
-fn create_lvl2_block_entry(vaddr: u64, paddr: u64, memory_attribute: u64) {
-    let lvl2_align_size = 1 << L2_INDEX_LSB;
-
-    let lvl2_index = (vaddr / lvl2_align_size) as usize % ENTRIES_PER_LEVEL;
-
-    let flags = STAGE2_BLOCK_DESCRIPTOR::VALID::True
-        + STAGE2_BLOCK_DESCRIPTOR::TYPE::Block
-        + STAGE2_BLOCK_DESCRIPTOR::MEMORY_ATTR.val(memory_attribute)
-        + STAGE2_BLOCK_DESCRIPTOR::AF::True
-        + STAGE2_BLOCK_DESCRIPTOR::SH::InnerShareable;
-
-    unsafe {
-        let table = get_lvl2_table(vaddr).expect("Out of LVL2 tables");
-
-        table.entries[lvl2_index] =
-            (flags + STAGE2_BLOCK_DESCRIPTOR::ADDRESS_16K.val(paddr >> L2_INDEX_LSB)).value;
-
-        dsb(SY);
-    };
-}
-
-fn create_lvl1_table_entry(vaddr: u64, table_address: u64) {
-    let lvl1_align_size = 1 << L1_INDEX_LSB;
-
-    let lvl1_index = (vaddr / lvl1_align_size) as usize % ENTRIES_PER_LEVEL;
-
-    unsafe {
-        LVL0_TABLE.lvl1[0].entries[lvl1_index] = (STAGE1_NEXTLEVEL_DESCRIPTOR::VALID::True
-            + STAGE1_NEXTLEVEL_DESCRIPTOR::TYPE::Table
-            + STAGE1_NEXTLEVEL_DESCRIPTOR::ADDRESS_16K.val(table_address >> PAGE_GRANULE))
-        .value;
-
-        dsb(SY);
-    };
-}
-
-fn map_lvl2_block(vaddr: u64, paddr: u64, size: u64, memory_attribute: u64) {
-    let lvl2_align_size = 1 << L2_INDEX_LSB;
-    let size = utils::align_up(size, lvl2_align_size);
-
-    let mut vaddr = utils::align_down(vaddr, lvl2_align_size);
-    let mut paddr = utils::align_down(paddr, lvl2_align_size);
-    let mut page_count = size / lvl2_align_size;
-
-    while page_count != 0 {
-        create_lvl2_block_entry(vaddr, paddr, memory_attribute);
-        vaddr += lvl2_align_size;
-        paddr += lvl2_align_size;
-        page_count -= 1;
+        current_virtual_address += L2_PAGE_SIZE;
+        current_physical_address += L2_PAGE_SIZE;
+        remaining_size -= L2_PAGE_SIZE as usize;
     }
 }
 
-pub fn map_normal_page(vaddr: u64, paddr: u64, size: u64, permission: MemoryPermission) {
-    map_page(vaddr, paddr, size, permission, mem_attr::NORMAL)
-}
+unsafe fn get_sctlr() -> u64 {
+    isb(SY);
 
-pub fn map_page(
-    vaddr: u64,
-    paddr: u64,
-    size: u64,
-    permission: MemoryPermission,
-    memory_attribute: u64,
-) {
-    if size == 0 {
-        return;
-    }
-
-    let lvl3_align_size = 1 << L3_INDEX_LSB;
-    let size = utils::align_up(size, lvl3_align_size);
-
-    let mut vaddr = utils::align_down(vaddr, lvl3_align_size);
-    let mut paddr = utils::align_down(paddr, lvl3_align_size);
-    let mut page_count = size / lvl3_align_size;
-
-    while page_count != 0 {
-        create_lvl3_page(vaddr, paddr, permission, memory_attribute);
-        vaddr += lvl3_align_size;
-        paddr += lvl3_align_size;
-        page_count -= 1;
-    }
-
-    // TLB maintenance
-    // TODO: EL2 & EL3
-    unsafe {
-        dsb(SY);
-        isb(SY);
-    };
-
-    //invalidate_tlb_all()
-}
-
-pub fn unmap_page(vaddr: u64, size: u64) {
-    if size == 0 {
-        return;
-    }
-
-    let lvl3_align_size = 1 << L3_INDEX_LSB;
-    let size = utils::align_up(size, lvl3_align_size);
-
-    let mut vaddr = utils::align_down(vaddr, lvl3_align_size);
-    let mut page_count = size / lvl3_align_size;
-
-    while page_count != 0 {
-        create_lvl3_page(vaddr, 0, MemoryPermission::Invalid, mem_attr::NORMAL);
-        vaddr += lvl3_align_size;
-        page_count -= 1;
-    }
-
-    // TLB maintenance
-    // TODO: EL2 & EL3
-    unsafe {
-        dsb(SY);
-        isb(SY);
-    };
-
-    invalidate_tlb_all()
-}
-
-unsafe fn init_executable_mapping() {
-    let text_start = &__text_start__ as *const _ as u64;
-    let text_end = &__text_end__ as *const _ as u64;
-    map_normal_page(
-        text_start,
-        text_start,
-        text_end - text_start,
-        MemoryPermission::RX,
-    );
-
-    let ro_start = &__rodata_start__ as *const _ as u64;
-    let ro_end = &__rodata_end__ as *const _ as u64;
-    map_normal_page(ro_start, ro_start, ro_end - ro_start, MemoryPermission::R);
-
-    let data_start = &__data_start__ as *const _ as u64;
-    let data_end = &__data_end__ as *const _ as u64;
-    map_normal_page(
-        data_start,
-        data_start,
-        data_end - data_start,
-        MemoryPermission::RW,
-    );
-
-    let bss_start = &__bss_start__ as *const _ as u64;
-    let bss_end = &__bss_end__ as *const _ as u64;
-    map_normal_page(
-        bss_start,
-        bss_start,
-        bss_end - bss_start,
-        MemoryPermission::RW,
-    );
-
-    // Setup our stack
-    let stack_start = &_stack_bottom as *const _ as u64;
-    let stack_end = &_stack_top as *const _ as u64;
-    map_normal_page(
-        stack_start,
-        stack_start,
-        stack_end - stack_start,
-        MemoryPermission::RW,
-    );
-
-    // Also setup the exception vector
-    let vectors_start = &__vectors_start__ as *const _ as u64;
-    let vectors_end = &__vectors_end__ as *const _ as u64;
-    map_normal_page(
-        vectors_start,
-        vectors_start,
-        vectors_end - vectors_start,
-        MemoryPermission::RX,
-    );
-}
-
-fn init_page_mapping() {
-    // Setup LVL0 entries
-    unsafe {
-        for (lvl0_index, lvl0_entry) in LVL0_TABLE.entries.iter_mut().enumerate() {
-            let table_address = &LVL0_TABLE.lvl1[lvl0_index].entries[0] as *const _ as u64;
-
-            *lvl0_entry = (STAGE1_NEXTLEVEL_DESCRIPTOR::VALID::True
-                + STAGE1_NEXTLEVEL_DESCRIPTOR::TYPE::Table
-                + STAGE1_NEXTLEVEL_DESCRIPTOR::ADDRESS_16K.val(table_address >> PAGE_GRANULE))
-            .value;
-        }
-    }
-
-    // map MMIOs
-    const MMIO_RANGE_0_ADDR: u64 = 0x0000000000;
-    const MMIO_RANGE_0_SIZE: u64 = 0x0800000000;
-
-    // Map the known MMIO range as nGnRnE with an identity mapping.
-    map_lvl2_block(
-        MMIO_RANGE_0_ADDR,
-        MMIO_RANGE_0_ADDR,
-        MMIO_RANGE_0_SIZE,
-        mem_attr::MMIO_nGnRnE,
-    );
-
-    // Map the known MMIO range as nGnRE at 0xF000000000
-    map_lvl2_block(
-        0xf000000000,
-        MMIO_RANGE_0_ADDR,
-        MMIO_RANGE_0_SIZE,
-        mem_attr::MMIO_nGnRE,
-    );
-
-    // Map 16GB of normal memory
-    map_lvl2_block(0x0800000000, 0x0800000000, 0x0400000000, mem_attr::NORMAL);
-
-    unsafe {
-        //init_executable_mapping();
-    }
-}
-
-#[inline]
-fn get_sctlr() -> u64 {
     let mut ctrl: u64;
 
-    unsafe {
-        match utils::get_current_el() {
-            1 => asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) ctrl, options(nostack)),
-            2 => asm!("mrs {sctlr}, sctlr_el2", sctlr = out(reg) ctrl, options(nostack)),
-            _ => unimplemented!(),
-        }
-    }
+    asm!("mrs {sctlr}, sctlr_el2", sctlr = out(reg) ctrl, options(nostack));
 
     ctrl
 }
 
-#[inline]
-fn set_sctlr(new_sctlr: u64) {
-    unsafe {
-        match utils::get_current_el() {
-            1 => asm!("msr sctlr_el1, {sctlr}", sctlr = in(reg) new_sctlr, options(nostack)),
-            2 => asm!("msr sctlr_el2, {sctlr}", sctlr = in(reg) new_sctlr, options(nostack)),
-            _ => unimplemented!(),
-        }
-
-        isb(SY);
-    }
-}
-
-#[inline]
-pub fn invalidate_tlb_all() {
-    unsafe {
-        dsb(SY);
-
-        match utils::get_current_el() {
-            1 => asm!("tlbi vmalle1"),
-            2 => asm!("tlbi alle2"),
-            _ => unimplemented!(),
-        }
-
-        dsb(SY);
-        isb(SY);
-    }
-}
-
-#[inline]
-pub fn invalidate_icache_all() {
-    unsafe {
-        asm!("ic iallu");
-        dsb(SY);
-        isb(SY);
-    }
-}
-
-#[inline]
-unsafe fn set_mair_ttbr_tcr(mair: u64, ttbr: u64, tcr: u64) {
-    match utils::get_current_el() {
-        1 => {
-            asm!(
-                "
-                dsb sy
-                msr mair_el1, {mair}
-                msr tcr_el1, {tcr}
-                msr ttbr0_el1, {ttbr}
-                msr ttbr1_el1, {ttbr}
-                tlbi vmalle1
-                dsb sy
-                isb sy
-                ",
-                mair = in(reg) mair,
-                ttbr = in(reg) ttbr,
-                tcr = in(reg) tcr,
-                options(nostack),
-            );
-        }
-        2 => {
-            asm!(
-                "
-                dsb sy
-                msr mair_el2, {mair}
-                msr tcr_el2, {tcr}
-                msr ttbr0_el2, {ttbr}
-                msr ttbr1_el2, {ttbr}
-                tlbi alle2
-                dsb sy
-                isb sy
-                ",
-                mair = in(reg) mair,
-                ttbr = in(reg) ttbr,
-                tcr = in(reg) tcr,
-                options(nostack),
-            );
-        }
-        _ => unimplemented!(),
-    }
+unsafe fn set_sctlr(new_sctlr: u64) {
+    asm!("msr sctlr_el2, {sctlr}", sctlr = in(reg) new_sctlr, options(nostack));
+    asm!("ic iallu");
+    dsb(SY);
+    isb(SY);
 }
 
 pub unsafe fn setup() {
-    let mut uart = &mut UART::INSTANCE;
+    page_table_lvl2_index = 0;
 
-    writeln!(&mut uart, "Configuring MMU...").ok();
-    init_page_mapping();
+    // configure level 0
+    for (i, entry) in (&mut LVL0_TABLE.entries[..]).iter_mut().enumerate() {
+        let lvl1_table_address: u64 = &mut LVL1_TABLE[i] as *mut _ as u64;
 
-    // Setup memory attributes, lvl1 table and tcr.
-    let mair: u64 = (0x00 << (mem_attr::MMIO_nGnRnE * 8))
-        | (0x00 << (mem_attr::MMIO_nGnRE * 8))
-        | (0xFF << (mem_attr::NORMAL * 8));
+        *entry = create_table_page_table_entry(lvl1_table_address)
+    }
 
-    let ttbr = &LVL0_TABLE.entries[0] as *const _ as u64;
+    // Add default mappings
+    add_lvl2_mapping(0x0000000000, 0x0000000000, 0x0800000000, mem_attr::DEVICE_nGnRE, PERMISSION_RW);
+    add_lvl2_mapping(0x0800000000, 0x0800000000, 0x0400000000, mem_attr::NORMAL, PERMISSION_RWX);
 
-    // Taken from m1n1
-    // TODO: improve this
+    dsb(SY);
+
+    writeln!(&mut UART::INSTANCE, "MMU setup starting!");
+
+    let mair: u64 = (0xFF << (u64::from(mem_attr::NORMAL) * 8))
+    | (0x00 << (u64::from(mem_attr::DEVICE_nGnRE) * 8))
+    | (0x04 << (u64::from(mem_attr::DEVICE_nGnRnE) * 8));
+
+    writeln!(&mut UART::INSTANCE, "mair, tcr and ttbr setup");
+
+    asm!("msr mair_el2, {mair}", mair = in(reg) mair, options(nostack));
+
     let tcr: u64 = TCR_IPS_1TB
         | TCR_TG1_16K
         | TCR_SH1_IS
@@ -698,18 +210,34 @@ pub unsafe fn setup() {
         | TCR_SH0_IS
         | TCR_ORGN0_WBWA
         | TCR_IRGN0_WBWA
-        | ((64 - TARGET_BITS as u64) << 0);
-    set_mair_ttbr_tcr(mair, ttbr, tcr);
+        | TCR_T0SZ_48BIT;
 
-    // finally enable MMU and cache
-    let mut ctrl = get_sctlr();
+    asm!("msr tcr_el2, {tcr}", tcr = in(reg) tcr, options(nostack));
 
-    ctrl |= (1 << 12) |    // I, Instruction cache enable. This is an enable bit for instruction caches at EL0 and EL1
-            (1 << 2)  |    // C, Data cache enable. This is an enable bit for data caches at EL0 and EL1
-            (1 << 0);      // set M, enable MMU
+    let ttbr = &mut LVL0_TABLE.entries[0] as *mut _ as u64;
 
-    set_sctlr(ctrl);
+    writeln!(&mut UART::INSTANCE, "{:x}", ttbr);
 
-    invalidate_icache_all();
-    invalidate_tlb_all();
+    asm!("msr ttbr0_el2, {ttbr0}", ttbr0 = in(reg) ttbr, options(nostack));
+    asm!("msr ttbr1_el2, {ttbr1}", ttbr1 = in(reg) ttbr, options(nostack));
+
+    asm!("isb sy
+          tlbi vmalls12e1is
+          isb sy
+          ic iallu
+          isb sy
+        ");
+
+    writeln!(&mut UART::INSTANCE, "sctrl setup");
+
+    let sctrl_old = get_sctlr();
+
+    let sctrl_new = sctrl_old  |
+                     (1 << 12) |    // I, Instruction cache enable. This is an enable bit for instruction caches at EL0 and EL1
+                     (1 << 2)  |    // C, Data cache enable. This is an enable bit for data caches at EL0 and EL1
+                     (1 << 0); // set M, enable MMU
+    
+    set_sctlr(sctrl_new);
+
+    writeln!(&mut UART::INSTANCE, "MMU on!");
 }

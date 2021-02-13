@@ -11,7 +11,15 @@ cortex-a = "5.1"
 log = "0.4.6"
 register = "0.3.2"
 static_assertions = "*"
+linked_list_allocator = { version = "0.8.4", default-features = false, features = ["const_mut_refs"] }
 enum_primitive = { git = "https://github.com/roblabla/enum_primitive-rs.git", branch = "master"}
+
+[profile.release]
+codegen-units = 1 # better optimizations
+debug = true # symbols are nice and they don't increase the size on Flash
+lto = true # better optimizations
+opt-level = 'z'
+panic = 'abort'
 
 [dependencies.num-traits]
 version = "0.2"

@@ -7,6 +7,7 @@ use core::ptr;
 use crate::m1::uart::UART;
 
 use crate::exception_vectors;
+use crate::memory;
 use crate::mmu;
 use crate::utils;
 
@@ -26,9 +27,17 @@ macro_rules! entry {
 #[panic_handler]
 fn panic(panic_info: &PanicInfo<'_>) -> ! {
     let mut uart = &mut UART::INSTANCE;
-    loop {
-        writeln!(&mut uart, "PANIC: {}\r", panic_info).ok();
-    }
+    writeln!(&mut uart, "PANIC: {}\r", panic_info).ok();
+
+    loop {}
+}
+
+#[alloc_error_handler]
+fn allocation_error(_: core::alloc::Layout) -> ! {
+    let mut uart = &mut UART::INSTANCE;
+    writeln!(&mut uart, "Memory exhausting").ok();
+
+    loop {}
 }
 
 extern "C" {
@@ -188,11 +197,11 @@ pub unsafe extern "C" fn relocate_self(aslr_base: *mut u8) -> u32 {
 
 #[no_mangle]
 unsafe extern "C" fn clean_bss(start_bss: *mut u8, end_bss: *mut u8) {
-    /*ptr::write_bytes(
+    ptr::write_bytes(
         start_bss,
         0,
         end_bss as *const _ as usize - start_bss as *const _ as usize,
-    );*/
+    );
 }
 
 #[no_mangle]
@@ -205,6 +214,8 @@ pub unsafe extern "C" fn _start_with_stack() -> ! {
     //utils::wait_for_input();
 
     writeln!(&mut uart, "Hello from EL {}", utils::get_current_el()).ok();
+
+    memory::setup();
 
     exception_vectors::setup();
     writeln!(&mut uart, "exception vectors setup done").ok();

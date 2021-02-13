@@ -30,6 +30,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "linked_list_allocator"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "822add9edb1860698b79522510da17bef885171f75aa395cff099d770c609c24"
+
+[[package]]
 name = "log"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -44,6 +50,7 @@ version = "0.1.0"
 dependencies = [
  "cortex-a",
  "enum_primitive",
+ "linked_list_allocator",
  "log",
  "num-traits",
  "register 0.3.3",

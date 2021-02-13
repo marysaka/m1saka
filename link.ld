@@ -1,4 +1,4 @@
-OUTPUT_FORMAT("elf64-littleaarch64", "elf64-littleaarch64", "elf64-littleaarch64")
+OUTPUT_FORMAT("elf64-littleaarch64")
 OUTPUT_ARCH(aarch64)
 ENTRY(_start)
 
@@ -162,11 +162,22 @@ SECTIONS
     . = ALIGN(0x1000);
 
     . = ALIGN(16);
+
+    _heap_bottom = .;
+    . = . + 0x200000; /* 2MB of heap memory */
+    . = ALIGN(16);
+    PROVIDE(_heap_top = .);
+
     _stack_bottom = .;
     . = . + 0x10000; /* 64kB of stack memory */
     . = ALIGN(16);
     PROVIDE(_stack_top = .);
   } :bss
+
+  .stack_sizes (INFO) :
+  {
+    KEEP(*(.stack_sizes));
+  }
 
   __end__ = .;
 
