@@ -206,10 +206,6 @@ unsafe extern "C" fn clean_bss(start_bss: *mut u8, end_bss: *mut u8) {
 
 #[no_mangle]
 pub unsafe extern "C" fn _start_with_stack() -> ! {
-    // Ensure UART is at standard baud.
-    let mut uart = &mut UART::INSTANCE;
-    //uart.init(115_200);
-
     // Wait for user to input something before continuing (to be sure someone is watching logs)
     //utils::wait_for_input();
 

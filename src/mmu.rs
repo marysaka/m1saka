@@ -1,3 +1,7 @@
+//! Based on m1n1 memory setup (Copyright (c) 2021 The Asahi Linux contributors) 
+//! https://github.com/AsahiLinux/m1n1/blob/main/src/memory.c
+//! 
+//! TODO: rewrite and extends this to our needs (possibly by not sharing similarities to m1n1's mmu setup).
 #![allow(clippy::identity_op)]
 
 use crate::utils;
@@ -25,7 +29,6 @@ const PTE_TYPE_BLOCK: u64 = 0b01;
 const PTE_TYPE_TABLE: u64 = 0b11;
 const PTE_FLAG_ACCESS: u64 = 1 << 10;
 
-const PTE_AP_EL0: u64 = 1 << 6;
 const PTE_AP_RO: u64 = 1 << 7;
 const PTE_PXN: u64 = 1 << 53;
 const PTE_UXN: u64 = 1 << 54;
@@ -78,8 +81,6 @@ static mut LVL1_TABLE: [LevelTable; 2] = [LevelTable {
 }, LevelTable {
     entries: [0x0 ; ENTRIES_PER_LEVEL]
 }];
-
-static mut page_table_lvl2_index: usize = 0;
 
 unsafe fn create_block_page_table_entry(addr: u64, attr: u8, permissions: u64) -> u64 {
     PTE_TYPE_BLOCK | addr | PTE_FLAG_ACCESS | (u64::from(attr) & 7) << 2 | permissions
@@ -175,8 +176,6 @@ unsafe fn set_sctlr(new_sctlr: u64) {
 }
 
 pub unsafe fn setup() {
-    page_table_lvl2_index = 0;
-
     // configure level 0
     for (i, entry) in (&mut LVL0_TABLE.entries[..]).iter_mut().enumerate() {
         let lvl1_table_address: u64 = &mut LVL1_TABLE[i] as *mut _ as u64;
@@ -190,13 +189,11 @@ pub unsafe fn setup() {
 
     dsb(SY);
 
-    writeln!(&mut UART::INSTANCE, "MMU setup starting!");
+    writeln!(&mut UART::INSTANCE, "Configuring MMU...").ok();
 
     let mair: u64 = (0xFF << (u64::from(mem_attr::NORMAL) * 8))
     | (0x00 << (u64::from(mem_attr::DEVICE_nGnRE) * 8))
     | (0x04 << (u64::from(mem_attr::DEVICE_nGnRnE) * 8));
-
-    writeln!(&mut UART::INSTANCE, "mair, tcr and ttbr setup");
 
     asm!("msr mair_el2, {mair}", mair = in(reg) mair, options(nostack));
 
@@ -216,7 +213,7 @@ pub unsafe fn setup() {
 
     let ttbr = &mut LVL0_TABLE.entries[0] as *mut _ as u64;
 
-    writeln!(&mut UART::INSTANCE, "{:x}", ttbr);
+    writeln!(&mut UART::INSTANCE, "{:x}", ttbr).ok();
 
     asm!("msr ttbr0_el2, {ttbr0}", ttbr0 = in(reg) ttbr, options(nostack));
     asm!("msr ttbr1_el2, {ttbr1}", ttbr1 = in(reg) ttbr, options(nostack));
@@ -228,7 +225,7 @@ pub unsafe fn setup() {
           isb sy
         ");
 
-    writeln!(&mut UART::INSTANCE, "sctrl setup");
+    writeln!(&mut UART::INSTANCE, "sctrl setup").ok();
 
     let sctrl_old = get_sctlr();
 
@@ -239,5 +236,5 @@ pub unsafe fn setup() {
     
     set_sctlr(sctrl_new);
 
-    writeln!(&mut UART::INSTANCE, "MMU on!");
+    writeln!(&mut UART::INSTANCE, "MMU on!").ok();
 }

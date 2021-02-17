@@ -18,7 +18,7 @@ mod utils;
 entry!(main);
 
 fn main() {
-    logger::init(1_500_000);
+    logger::init(1_500_000).expect("Logger init failed");
 
     info!("Hello I'm m1saka say m1saka");
 }
