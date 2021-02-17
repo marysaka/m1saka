@@ -222,7 +222,7 @@ pub unsafe fn setup() {
     asm!("msr ttbr1_el2, {ttbr1}", ttbr1 = in(reg) ttbr, options(nostack));
 
     asm!("isb sy
-          tlbi vmalls12e1is
+          tlbi alle2
           isb sy
           ic iallu
           isb sy
