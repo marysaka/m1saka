@@ -80,44 +80,6 @@ impl UART {
         let receive_reg = unsafe { &((*self.register_base).URXH) };
         receive_reg.get() as u8
     }
-
-    pub fn put_u32(&self, d: u32) {
-        let mut digits: [u8; 10] = [0x0; 10];
-        let mut d = d;
-
-        for i in digits.iter_mut() {
-            *i = ((d % 10) + 0x30) as u8;
-
-            d /= 10;
-
-            if d == 0 {
-                break;
-            }
-        }
-
-        for c in digits.iter().rev() {
-            self.put_byte(*c);
-        }
-    }
-
-    pub fn put_u64(&self, d: u64) {
-        let mut digits: [u8; 20] = [0x0; 20];
-        let mut d = d;
-
-        for i in digits.iter_mut() {
-            *i = ((d % 10) + 0x30) as u8;
-
-            d /= 10;
-
-            if d == 0 {
-                break;
-            }
-        }
-
-        for c in digits.iter().rev() {
-            self.put_byte(*c);
-        }
-    }
 }
 
 impl core::fmt::Write for UART {

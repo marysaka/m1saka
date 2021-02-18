@@ -15,6 +15,7 @@ extern "C" {
     static _heap_top: u8;
 }
 
+// TODO: highly unsafe, use locks right after MMU is on!
 pub struct HeapAllocator(Heap);
 
 impl HeapAllocator {

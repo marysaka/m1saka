@@ -13,6 +13,8 @@ register = "0.3.2"
 static_assertions = "*"
 linked_list_allocator = { version = "0.8.4", default-features = false, features = ["const_mut_refs"] }
 enum_primitive = { git = "https://github.com/roblabla/enum_primitive-rs.git", branch = "master"}
+embedded-hal = "0.2.4"
+nb = "1.0.0"
 
 [profile.release]
 codegen-units = 1 # better optimizations

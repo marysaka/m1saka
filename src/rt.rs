@@ -206,15 +206,8 @@ unsafe extern "C" fn clean_bss(start_bss: *mut u8, end_bss: *mut u8) {
 
 #[no_mangle]
 pub unsafe extern "C" fn _start_with_stack() -> ! {
-    // Wait for user to input something before continuing (to be sure someone is watching logs)
-    //utils::wait_for_input();
-
-    writeln!(&mut UART::INSTANCE, "Hello from EL {}", utils::get_current_el()).ok();
-
     memory::setup();
-
     exception_vectors::setup();
-    writeln!(&mut UART::INSTANCE, "exception vectors setup done").ok();
     mmu::setup();
 
     // Call user entry point
