@@ -9,8 +9,7 @@ struct UARTLogger {
 
 impl UARTLogger {
     fn configure(&mut self, baud_rate: u32) {
-        // TODO
-        let mut uart = &UART::INSTANCE;
+        let uart = &UART::INSTANCE;
 
         uart.init(baud_rate);
     }

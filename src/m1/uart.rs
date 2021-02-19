@@ -31,7 +31,7 @@ pub const UTRSTAT_TIMEOUT: u32 = 1 << 3;
 
 impl UART {
     pub const INSTANCE: Self = UART {
-        register_base: 0x2352_00000 as *const UARTRegister,
+        register_base: 0x0002_3520_0000 as *const UARTRegister,
     };
 
     pub fn init(&self, baud_rate: u32) {

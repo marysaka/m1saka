@@ -2,7 +2,6 @@ use core::fmt::Write;
 
 use crate::m1::uart::UART;
 
-use crate::rt;
 use crate::utils;
 
 global_asm!(

@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 #![feature(asm, global_asm, naked_functions, alloc_error_handler)]
+#![allow(dead_code)]
 
-#[macro_use]
 extern crate alloc;
 
 use log::info;
@@ -12,17 +12,12 @@ mod logger;
 mod m1;
 mod m1_hal;
 mod m1n1;
-mod mmu;
 mod memory;
+mod mmu;
 mod rt;
 mod utils;
 
 entry!(main);
-
-use m1n1::UartReply;
-use m1n1::ProxyReply;
-use m1::uart::UART;
-use embedded_hal::serial::Write;
 
 fn main() {
     logger::init(1_500_000).expect("Logger init failed");

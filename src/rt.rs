@@ -9,7 +9,6 @@ use crate::m1::uart::UART;
 use crate::exception_vectors;
 use crate::memory;
 use crate::mmu;
-use crate::utils;
 
 #[macro_export]
 macro_rules! entry {
@@ -26,7 +25,8 @@ macro_rules! entry {
 
 #[panic_handler]
 fn panic(panic_info: &PanicInfo<'_>) -> ! {
-    let mut uart = &mut UART::INSTANCE;
+    let mut uart = UART::INSTANCE;
+
     writeln!(&mut uart, "PANIC: {}\r", panic_info).ok();
 
     loop {}
@@ -34,7 +34,8 @@ fn panic(panic_info: &PanicInfo<'_>) -> ! {
 
 #[alloc_error_handler]
 fn allocation_error(_: core::alloc::Layout) -> ! {
-    let mut uart = &mut UART::INSTANCE;
+    let mut uart = UART::INSTANCE;
+
     writeln!(&mut uart, "Memory exhausting").ok();
 
     loop {}
@@ -84,11 +85,9 @@ pub unsafe extern "C" fn trampoline() -> ! {
 
 const DT_NULL: isize = 0;
 const DT_RELA: isize = 7;
-const DT_RELASZ: isize = 8;
 const DT_RELAENT: isize = 9;
 const DT_RELACOUNT: isize = 0x6ffffff9;
 const DT_REL: isize = 17;
-const DT_RELSZ: isize = 18;
 const DT_RELENT: isize = 19;
 const DT_RELCOUNT: isize = 0x6ffffffa;
 
