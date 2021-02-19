@@ -14,9 +14,9 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "cortex-a"
-version = "5.1.2"
+version = "5.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d33a61602f83c3fff3e092967ad4d5d820a9fea7bc418e119616872085fe731d"
+checksum = "a95bf88dac37519b2a8dc3caa99bf58f5b90053f12a9aa2f990f187aa327ee8f"
 dependencies = [
  "register 1.0.2",
 ]
@@ -29,14 +29,6 @@ checksum = "fa998ce59ec9765d15216393af37a58961ddcefb14c753b4816ba2191d865fcb"
 dependencies = [
  "nb 0.1.3",
  "void",
-]
-
-[[package]]
-name = "enum_primitive"
-version = "0.1.1"
-source = "git+https://github.com/roblabla/enum_primitive-rs.git?branch=master#e2344b98b16bcc54682bc838a87fcf1dfc6ab8d6"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -60,7 +52,6 @@ version = "0.1.0"
 dependencies = [
  "cortex-a",
  "embedded-hal",
- "enum_primitive",
  "linked_list_allocator",
  "log",
  "nb 1.0.0",
